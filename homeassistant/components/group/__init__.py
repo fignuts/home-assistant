@@ -5,6 +5,8 @@ For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/group/
 """
 import threading
+import importlib
+import sys
 from collections import OrderedDict
 
 import voluptuous as vol
@@ -29,6 +31,7 @@ CONF_VIEW = 'view'
 ATTR_AUTO = 'auto'
 ATTR_ORDER = 'order'
 ATTR_VIEW = 'view'
+ATTR_GROUP_DOMAIN = 'group_domain'
 
 
 def _conf_preprocess(value):
@@ -74,6 +77,42 @@ def _get_group_on_off(state):
             return states
 
     return None, None
+
+
+def _get_group_domain(hass, entity_ids):
+    """
+    Return group_domain and the appropriate subclass.
+
+    If all group members are of 1 domain a subclass can define additional
+    entity attributes to allow for type specific functionality in the UI.
+    """
+    all_entity_ids = expand_entity_ids(hass, entity_ids)
+    group_domain = DOMAIN
+    for entity_id in all_entity_ids:
+        if not isinstance(entity_id, str):
+            continue
+        domain, _ = split_entity_id(entity_id)
+        if group_domain == DOMAIN:
+            group_domain = domain
+            continue
+        if group_domain != domain:
+            group_domain = DOMAIN
+            break
+
+    group_domain_class_name = 'Group' + group_domain.title()
+
+    try:
+        group_domain_module = importlib.import_module(
+            'homeassistant.components.group.group_' + group_domain)
+    except ImportError:
+        group_domain_module = sys.modules[__name__]
+
+    group_domain_class = getattr(group_domain_module, group_domain_class_name,
+                                 Group)
+    if group_domain_class is Group:
+        group_domain = DOMAIN
+
+    return group_domain, group_domain_class
 
 
 def is_on(hass, entity_id):
@@ -148,9 +187,10 @@ def setup(hass, config):
         entity_ids = conf.get(CONF_ENTITIES) or []
         icon = conf.get(CONF_ICON)
         view = conf.get(CONF_VIEW)
-
-        Group(hass, name, entity_ids, icon=icon, view=view,
-              object_id=object_id)
+        group_domain, group_domain_class = _get_group_domain(hass, entity_ids)
+        group_domain_class(hass, name, entity_ids, group_domain, icon=icon,
+                           view=view, object_id=object_id,
+                           group_domain=group_domain)
 
     return True
 
@@ -160,7 +200,7 @@ class Group(Entity):
 
     # pylint: disable=too-many-instance-attributes, too-many-arguments
     def __init__(self, hass, name, entity_ids=None, user_defined=True,
-                 icon=None, view=False, object_id=None):
+                 icon=None, view=False, object_id=None, group_domain=DOMAIN):
         """Initialize a group."""
         self.hass = hass
         self._name = name
@@ -174,6 +214,7 @@ class Group(Entity):
         self.tracking = []
         self.group_on = None
         self.group_off = None
+        self._group_domain = group_domain
         self._assumed_state = False
         self._lock = threading.Lock()
 
@@ -213,6 +254,7 @@ class Group(Entity):
         data = {
             ATTR_ENTITY_ID: self.tracking,
             ATTR_ORDER: self._order,
+            ATTR_GROUP_DOMAIN: self._group_domain
         }
         if not self._user_defined:
             data[ATTR_AUTO] = True
